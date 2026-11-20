@@ -127,6 +127,19 @@ ul.items{list-style:none;margin:0;padding:0}
 #view .close{position:absolute;top:calc(12px + env(safe-area-inset-top,0px));right:max(12px,env(safe-area-inset-right,0px));min-height:44px;padding:0 16px;border:0;border-radius:10px;background:rgba(255,255,255,.2);color:#fff;font-weight:700}
 
 #toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(88px + env(safe-area-inset-bottom,0px));z-index:15;max-width:calc(100% - 32px);padding:10px 16px;border-radius:99px;background:var(--fg);color:var(--bg);font-weight:600;font-size:14px}
+
+/* NOVO: Estilo para o botão flutuante de atualização */
+#btn-update {
+  position: fixed;
+  bottom: calc(88px + env(safe-area-inset-bottom,0px));
+  right: max(16px, env(safe-area-inset-right,0px));
+  z-index: 40;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  display: none; /* Fica oculto até ter atualização */
+}
 </style>
 </head>
 <body>
@@ -153,6 +166,14 @@ ul.items{list-style:none;margin:0;padding:0}
 <div id="sheet" hidden><div class="sheet-box" role="dialog" aria-modal="true"><h2></h2><div class="body"></div><div class="acts"></div></div></div>
 <div id="view" hidden data-act="close-view"><img alt="Foto ampliada"><button class="close" type="button">Fechar</button></div>
 <div id="toast" role="status" hidden></div>
+
+<!-- NOVO: Botão de atualização flutuante com ícone SVG de Refresh -->
+<button id="btn-update" class="btn primary icon" aria-label="Atualizar aplicativo">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/>
+    <path d="M21 3v5h-5"/>
+  </svg>
+</button>
 
 <input id="camIn" type="file" accept="image/*" capture="environment" hidden>
 <input id="galIn" type="file" accept="image/*" hidden>
