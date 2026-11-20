@@ -50,6 +50,7 @@ let state = defaultState();
 const blobs = new Map();   // id do item -> Blob (JPEG)
 const urls = new Map();    // id do item -> object URL da miniatura
 let pending = null;        // item que está recebendo a foto
+let pendingSrc = 'cam';    // 'cam' ou 'gal'
 
 let saveTimer;
 const save = () => {
@@ -105,6 +106,9 @@ function buildSections(s) {
   ];
 }
 
+const wmText = (secId, group, label) =>
+  secId === 'inst' ? label : secId === 'ca' ? `Tensão CA: ${label}` : `Tensão CC: ${group}, ${label}`;
+
 const dataFields = s => [
   { label: 'Nome da UFV', v: s.ufv },
   { label: 'Marca dos módulos', v: s.modBrand },
@@ -115,7 +119,7 @@ const dataFields = s => [
 
 function stats() {
   const secs = buildSections(state);
-  const items = secs.flatMap(sec => sec.groups.flatMap(g => g.items.map(it => ({ ...it, sec: sec.title, group: g.title }))));
+  const items = secs.flatMap(sec => sec.groups.flatMap(g => g.items.map(it => ({ ...it, sec: sec.title, group: g.title, wm: wmText(sec.id, g.title, it.label) }))));
   const df = dataFields(state);
   const photosDone = items.filter(i => blobs.has(i.id)).length;
   const dataDone = df.filter(f => filled(f.v)).length;
@@ -137,7 +141,69 @@ const removePhoto = async id => {
   await safe(() => idb('photos', 'readwrite', st => st.delete(id)));
 };
 
-async function compress(file) {
+/* ---------- localização ---------- */
+let geo = null, geoWatch = null, geoState = 'idle';   // idle | wait | ok | off
+function setGeoChip() {
+  const c = $('#gps'); if (!c) return;
+  c.className = 'gps' + (geoState === 'ok' ? ' ok' : geoState === 'off' ? ' off' : '');
+  c.textContent = geoState === 'ok' ? `GPS ±${Math.round(geo.acc)} m` : geoState === 'off' ? 'GPS desligado' : 'GPS…';
+}
+function startGeo() {
+  if (geoWatch != null) return;
+  if (!navigator.geolocation) { geoState = 'off'; setGeoChip(); return; }
+  geoState = 'wait'; setGeoChip();
+  try {
+    geoWatch = navigator.geolocation.watchPosition(p => {
+      geo = { lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy, alt: p.coords.altitude };
+      geoState = 'ok'; setGeoChip();
+    }, err => {
+      if (err.code === 1) { geoState = 'off'; geoWatch = null; }
+      setGeoChip();
+    }, { enableHighAccuracy: true, maximumAge: 15000, timeout: 30000 });
+  } catch (e) { geoState = 'off'; geoWatch = null; setGeoChip(); }
+}
+const waitGeo = ms => new Promise(res => {
+  const t0 = Date.now();
+  (function poll() { if (geo || geoState === 'off' || Date.now() - t0 > ms) res(); else setTimeout(poll, 150); })();
+});
+
+/* ---------- marca d'água ---------- */
+function wrapLines(ctx, text, maxW) {
+  const out = []; let cur = '';
+  for (const w of String(text).split(' ')) {
+    const t = cur ? cur + ' ' + w : w;
+    if (cur && ctx.measureText(t).width > maxW) { out.push(cur); cur = w; } else cur = t;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+function drawWatermark(ctx, w, h, meta) {
+  const FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
+  const fs = Math.max(22, Math.round(Math.min(w, h) * 0.04));
+  const small = Math.round(fs * 0.78), pad = Math.round(fs * 0.7), maxW = w - pad * 2;
+  const blocks = [];
+  ctx.font = `700 ${fs}px ${FONT}`;
+  wrapLines(ctx, meta.title, maxW).forEach(t => blocks.push({ t, size: fs, bold: true }));
+  if (filled(meta.ufv)) blocks.push({ t: `UFV: ${meta.ufv.trim()}`, size: small });
+  if (meta.geo) {
+    blocks.push({ t: `${meta.geo.lat.toFixed(6)}, ${meta.geo.lon.toFixed(6)} (±${Math.round(meta.geo.acc)} m)`, size: small });
+    if (meta.geo.alt != null && isFinite(meta.geo.alt)) blocks.push({ t: `Altitude: ${Math.round(meta.geo.alt)} m`, size: small });
+  } else blocks.push({ t: meta.src === 'gal' ? 'Foto da galeria, sem GPS' : 'Sem localização', size: small });
+  blocks.push({ t: meta.when.toLocaleString('pt-BR'), size: small });
+
+  ctx.textAlign = 'right'; ctx.textBaseline = 'alphabetic'; ctx.lineJoin = 'round';
+  let y = h - pad;
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i];
+    ctx.font = `${b.bold ? 700 : 600} ${b.size}px ${FONT}`;
+    ctx.lineWidth = Math.max(3, b.size * 0.18);
+    ctx.strokeStyle = 'rgba(0,0,0,0.9)'; ctx.fillStyle = '#fff';
+    ctx.strokeText(b.t, w - pad, y); ctx.fillText(b.t, w - pad, y);
+    y -= Math.round(b.size * 1.28);
+  }
+}
+
+async function compress(file, meta) {
   let bmp;
   try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); }
   catch (e) {
@@ -148,18 +214,27 @@ async function compress(file) {
   const max = 1600, sc = Math.min(1, max / Math.max(bmp.width, bmp.height));
   const w = Math.round(bmp.width * sc), h = Math.round(bmp.height * sc);
   const c = document.createElement('canvas'); c.width = w; c.height = h;
-  c.getContext('2d').drawImage(bmp, 0, 0, w, h);
+  const ctx = c.getContext('2d');
+  ctx.drawImage(bmp, 0, 0, w, h);
   if (bmp.close) bmp.close();
-  return new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error('toBlob')), 'image/jpeg', 0.82));
+  drawWatermark(ctx, w, h, meta);
+  return new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error('toBlob')), 'image/jpeg', 0.85));
 }
 
 async function onFile(e) {
   const f = e.target.files[0]; e.target.value = '';
-  const id = pending;
+  const id = pending, src = pendingSrc;
   if (!f || !id) return;
   try {
     toast('Processando foto…');
-    const blob = await compress(f);
+    if (src === 'cam') await waitGeo(3000);
+    const it = stats().items.find(i => i.id === id);
+    const meta = {
+      title: it ? it.wm : '', ufv: state.ufv, src,
+      when: src === 'cam' ? new Date() : new Date(f.lastModified || Date.now()),
+      geo: src === 'cam' ? geo : null
+    };
+    const blob = await compress(f, meta);
     await safe(() => idb('photos', 'readwrite', st => st.put(blob, id)));
     blobs.set(id, blob); revoke(id);
     render(); toast('Foto salva');
@@ -197,7 +272,6 @@ const itemLabel = id => (stats().items.find(i => i.id === id) || {}).label || ''
 
 function renderItem(it) {
   const has = blobs.has(it.id);
-  const val = state.vals[it.id] || '';
   return `<li class="item${has ? ' done' : ''}" data-id="${it.id}">
     <button class="thumb" type="button" data-act="view" ${has ? '' : 'disabled'} aria-label="Ver foto">${has ? `<img src="${urlFor(it.id)}" alt="">` : ICON.camera}${has ? `<span class="tick">${ICON.check}</span>` : ''}</button>
     <div>
@@ -207,7 +281,6 @@ function renderItem(it) {
         <button class="btn" type="button" data-act="gal">${ICON.image}<span>Galeria</span></button>
         ${has ? `<button class="btn icon" type="button" data-act="del" aria-label="Remover foto">${ICON.trash}</button>` : ''}
       </div>
-      ${it.measure ? `<label class="val"><span>Valor medido</span><input type="text" inputmode="decimal" autocomplete="off" placeholder="0,0" data-val="${it.id}" value="${esc(val)}"><em>V</em></label>` : ''}
     </div>
   </li>`;
 }
@@ -303,7 +376,6 @@ async function change(mutator) {
     if (!ok) { state = before; render(); return; }
     for (const k of orphans) await removePhoto(k);
   }
-  Object.keys(state.vals).forEach(k => { if (!valid.has(k)) delete state.vals[k]; });
   save(); render();
 }
 
@@ -325,11 +397,6 @@ function buildReport(st) {
   L.push('', 'MPPTs');
   s.mppts.forEach((m, i) => L.push(`MPPT ${i + 1}: ${m.modules || '—'} módulos, ${m.strings} ${m.strings > 1 ? 'strings' : 'string'}`));
   L.push('', `Ligação CA: ${s.phases === 'tri' ? 'Trifásica' : 'Monofásica'}`);
-  const meas = st.items.filter(i => i.measure && filled(s.vals[i.id]));
-  if (meas.length) {
-    L.push('', 'VALORES MEDIDOS (V)');
-    meas.forEach(i => L.push(`${i.sec} / ${i.group ? i.group + ' / ' : ''}${i.label}: ${s.vals[i.id]}`));
-  }
   L.push('', 'ADICIONAL');
   L.push(`Fotos revisadas pelo Suporte O&M: ${s.reviewed ? 'Sim' : 'Não'}`);
   L.push(`Testes executados em contato com a fabricante do inversor: ${yn(s.factory)}`);
@@ -364,8 +431,7 @@ async function exportZip() {
         const file = `${pad2(n)}_${slug(it.file)}.jpg`;
         const b = blobs.get(it.id);
         if (b) dir.file(file, b);
-        itens.push({ secao: sec.title, grupo: g.title || null, item: it.label, arquivo: b ? `${sec.folder}/${file}` : null,
-          valor_v: it.measure && filled(s.vals[it.id]) ? s.vals[it.id] : null });
+        itens.push({ secao: sec.title, grupo: g.title || null, item: it.label, arquivo: b ? `${sec.folder}/${file}` : null });
       }));
     });
     root.file('dados.txt', txt);
@@ -400,8 +466,8 @@ document.addEventListener('click', async e => {
   const b = e.target.closest('[data-act]'); if (!b) return;
   const act = b.dataset.act, id = b.closest('.item')?.dataset.id;
   switch (act) {
-    case 'cam': pending = id; $('#camIn').click(); break;
-    case 'gal': pending = id; $('#galIn').click(); break;
+    case 'cam': pending = id; pendingSrc = 'cam'; startGeo(); $('#camIn').click(); break;
+    case 'gal': pending = id; pendingSrc = 'gal'; $('#galIn').click(); break;
     case 'view': $('#view img').src = urlFor(id); $('#view').hidden = false; break;
     case 'close-view': $('#view').hidden = true; break;
     case 'del':
@@ -427,7 +493,6 @@ document.addEventListener('input', e => {
   const t = e.target, d = t.dataset;
   if (d.field) state[d.field] = t.value;
   else if (d.mf) state.mppts[+d.mppt][d.mf] = t.value;
-  else if (d.val) state.vals[d.val] = t.value;
   else return;
   save(); updateProgress();
 });
@@ -463,6 +528,7 @@ $('#install').addEventListener('click', async () => {
   const vals = await safe(() => idb('photos', 'readonly', st => st.getAll())) || [];
   keys.forEach((k, i) => { if (vals[i]) blobs.set(k, vals[i]); });
   render();
+  startGeo();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
