@@ -1,5 +1,6 @@
 (() => {
 'use strict';
+const APP_VERSION = 3;
 
 /* ---------- utilidades ---------- */
 const $ = s => document.querySelector(s);
@@ -14,7 +15,7 @@ const svg = p => `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" st
 const ICON = {
   camera: svg('<path d="M4 8h3l1.6-2.2h6.8L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.6"/>'),
   image: svg('<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M21 16l-5-5-8 9"/>'),
-  trash: svg('<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>'),
+  x: svg('<path d="M6 6l12 12M18 6L6 18"/>'),
   check: svg('<path d="M5 12.5l4.5 4.5L19 7.5"/>')
 };
 
@@ -42,21 +43,56 @@ const defaultState = () => ({
   ufv: '', date: todayISO(), obs: '',
   modBrand: '', modModel: '', modPower: '',
   phases: 'tri',
+  sameStrings: true,
   mppts: [{ modules: '', strings: 2 }, { modules: '', strings: 2 }],
-  vals: {}, reviewed: false, factory: null,
+  reviewed: false, factory: null,
   open: { data: true, inst: true, ca: false, cc: false, pe: false, add: false }
 });
 let state = defaultState();
-const blobs = new Map();   // id do item -> Blob (JPEG)
-const urls = new Map();    // id do item -> object URL da miniatura
+
+/* fotos: id do item -> lista de { n, blob }. No IndexedDB a chave é "id|n". */
+const photos = new Map();
+const urls = new Map();
 let pending = null;        // item que está recebendo a foto
 let pendingSrc = 'cam';    // 'cam' ou 'gal'
+
+const pkey = (id, n) => n === 0 ? id : `${id}|${n}`;
+const plist = id => photos.get(id) || [];
+const has = id => plist(id).length > 0;
+const urlFor = (id, n) => {
+  const k = pkey(id, n);
+  if (!urls.has(k)) urls.set(k, URL.createObjectURL(plist(id).find(p => p.n === n).blob));
+  return urls.get(k);
+};
+const revoke = (id, n) => { const k = pkey(id, n); if (urls.has(k)) { URL.revokeObjectURL(urls.get(k)); urls.delete(k); } };
+async function addPhoto(id, blob) {
+  const list = plist(id);
+  const n = list.length ? Math.max(...list.map(p => p.n)) + 1 : 1;
+  await safe(() => idb('photos', 'readwrite', st => st.put(blob, pkey(id, n))));
+  list.push({ n, blob }); photos.set(id, list);
+}
+async function removePhoto(id, n) {
+  revoke(id, n);
+  await safe(() => idb('photos', 'readwrite', st => st.delete(pkey(id, n))));
+  const left = plist(id).filter(p => p.n !== n);
+  if (left.length) photos.set(id, left); else photos.delete(id);
+}
+const removeAll = async id => { for (const p of [...plist(id)]) await removePhoto(id, p.n); };
 
 let saveTimer;
 const save = () => {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => safe(() => idb('kv', 'readwrite', st => st.put(JSON.stringify(state), 'state'))), 250);
 };
+
+/* ---------- strings: numeração contínua no inversor ---------- */
+function stringNums(s) {
+  let g = 0;
+  return s.mppts.map(m => { const a = []; for (let j = 0; j < m.strings; j++) a.push(++g); return a; });
+}
+const strLabel = nums => nums.length === 1
+  ? `String ${nums[0]}`
+  : `Strings ${nums.slice(0, -1).join(', ')} e ${nums[nums.length - 1]}`;
 
 /* ---------- montagem do checklist ---------- */
 function buildSections(s) {
@@ -70,7 +106,7 @@ function buildSections(s) {
     ['protecoes', 'Proteções CC e CA (QGBT e string box abertos)', 'protecoes_CC_CA']
   ].map(([id, label, file]) => ({ id, label, file }));
 
-  const m = (id, label, file) => ({ id, label, file, measure: true });
+  const m = (id, label, file, mppt) => ({ id, label, file, mppt });
   const caGroups = s.phases === 'tri' ? [
     { title: 'Entre fases', items: [
       m('ca_l1l2', 'Fase L1 e fase L2', 'L1_L2'),
@@ -87,15 +123,18 @@ function buildSections(s) {
   ];
 
   const ccGroups = [], peGroups = [];
+  const nums = stringNums(s);
   s.mppts.forEach((mp, i) => {
     const ccItems = [], peItems = [];
-    for (let j = 0; j < mp.strings; j++) {
-      ccItems.push(m(`cc_${i + 1}_${j + 1}`, `String ${j + 1}`, `MPPT${i + 1}_String${j + 1}`));
-      peItems.push(m(`pp_${i + 1}_${j + 1}`, `Positivo da string ${j + 1} e terra da carcaça`, `MPPT${i + 1}_String${j + 1}_positivo_terra`));
-      peItems.push(m(`pn_${i + 1}_${j + 1}`, `Negativo da string ${j + 1} e terra da carcaça`, `MPPT${i + 1}_String${j + 1}_negativo_terra`));
-    }
-    ccGroups.push({ title: `MPPT ${i + 1}`, items: ccItems });
-    peGroups.push({ title: `MPPT ${i + 1}`, items: peItems });
+    nums[i].forEach((num, j) => {
+      const base = `MPPT${pad2(i + 1)}_String${pad2(num)}`;
+      ccItems.push(m(`cc_${i + 1}_${j + 1}`, `String ${num}`, base, i + 1));
+      peItems.push(m(`pp_${i + 1}_${j + 1}`, `Positivo - Terra String ${num}`, `${base}_positivo_terra`, i + 1));
+      peItems.push(m(`pn_${i + 1}_${j + 1}`, `Negativo - Terra String ${num}`, `${base}_negativo_terra`, i + 1));
+    });
+    const title = `MPPT ${i + 1} · ${strLabel(nums[i])}`;
+    ccGroups.push({ title, items: ccItems });
+    peGroups.push({ title, items: peItems });
   });
 
   return [
@@ -106,8 +145,8 @@ function buildSections(s) {
   ];
 }
 
-const wmText = (secId, group, label) =>
-  secId === 'inst' ? label : secId === 'ca' ? `Tensão CA: ${label}` : `Tensão CC: ${group}, ${label}`;
+const wmText = (secId, it) =>
+  secId === 'inst' ? it.label : secId === 'ca' ? `Tensão CA: ${it.label}` : `Tensão CC: MPPT ${it.mppt}, ${it.label}`;
 
 const dataFields = s => [
   { label: 'Nome da UFV', v: s.ufv },
@@ -119,26 +158,15 @@ const dataFields = s => [
 
 function stats() {
   const secs = buildSections(state);
-  const items = secs.flatMap(sec => sec.groups.flatMap(g => g.items.map(it => ({ ...it, sec: sec.title, group: g.title, wm: wmText(sec.id, g.title, it.label) }))));
+  const items = secs.flatMap(sec => sec.groups.flatMap(g => g.items.map(it => ({ ...it, sec: sec.title, group: g.title, wm: wmText(sec.id, it) }))));
   const df = dataFields(state);
-  const photosDone = items.filter(i => blobs.has(i.id)).length;
+  const photosDone = items.filter(i => has(i.id)).length;
   const dataDone = df.filter(f => filled(f.v)).length;
   return { secs, items, df, photosDone, dataDone, done: photosDone + dataDone, total: items.length + df.length };
 }
-const secCount = (sec) => {
+const secCount = sec => {
   const its = sec.groups.flatMap(g => g.items);
-  return [its.filter(i => blobs.has(i.id)).length, its.length];
-};
-
-/* ---------- fotos ---------- */
-const urlFor = id => {
-  if (!urls.has(id)) urls.set(id, URL.createObjectURL(blobs.get(id)));
-  return urls.get(id);
-};
-const revoke = id => { if (urls.has(id)) { URL.revokeObjectURL(urls.get(id)); urls.delete(id); } };
-const removePhoto = async id => {
-  blobs.delete(id); revoke(id);
-  await safe(() => idb('photos', 'readwrite', st => st.delete(id)));
+  return [its.filter(i => has(i.id)).length, its.length];
 };
 
 /* ---------- localização ---------- */
@@ -222,22 +250,24 @@ async function compress(file, meta) {
 }
 
 async function onFile(e) {
-  const f = e.target.files[0]; e.target.value = '';
+  const files = [...e.target.files]; e.target.value = '';
   const id = pending, src = pendingSrc;
-  if (!f || !id) return;
+  if (!files.length || !id) return;
   try {
     toast('Processando foto…');
     if (src === 'cam') await waitGeo(3000);
     const it = stats().items.find(i => i.id === id);
-    const meta = {
-      title: it ? it.wm : '', ufv: state.ufv, src,
-      when: src === 'cam' ? new Date() : new Date(f.lastModified || Date.now()),
-      geo: src === 'cam' ? geo : null
-    };
-    const blob = await compress(f, meta);
-    await safe(() => idb('photos', 'readwrite', st => st.put(blob, id)));
-    blobs.set(id, blob); revoke(id);
-    render(); toast('Foto salva');
+    for (const f of files) {
+      const k = plist(id).length;
+      const meta = {
+        title: (it ? it.wm : '') + (k > 0 ? ` (foto ${k + 1})` : ''),
+        ufv: state.ufv, src,
+        when: src === 'cam' ? new Date() : new Date(f.lastModified || Date.now()),
+        geo: src === 'cam' ? geo : null
+      };
+      await addPhoto(id, await compress(f, meta));
+    }
+    render(); toast(files.length > 1 ? `${files.length} fotos salvas` : 'Foto salva');
   } catch (err) { console.error(err); toast('Não foi possível ler essa foto'); }
 }
 
@@ -245,7 +275,7 @@ async function onFile(e) {
 let toastTimer;
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 2200);
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
 }
 
 function sheet({ title, lines = [], actions }) {
@@ -271,15 +301,18 @@ const confirmBox = (title, text, ok = 'Confirmar', danger = false) =>
 const itemLabel = id => (stats().items.find(i => i.id === id) || {}).label || '';
 
 function renderItem(it) {
-  const has = blobs.has(it.id);
-  return `<li class="item${has ? ' done' : ''}" data-id="${it.id}">
-    <button class="thumb" type="button" data-act="view" ${has ? '' : 'disabled'} aria-label="Ver foto">${has ? `<img src="${urlFor(it.id)}" alt="">` : ICON.camera}${has ? `<span class="tick">${ICON.check}</span>` : ''}</button>
-    <div>
-      <div class="lbl">${esc(it.label)}</div>
+  const list = plist(it.id), done = list.length > 0;
+  const thumbs = list.map(p => `<div class="ph" data-n="${p.n}">
+      <button class="pv" type="button" data-act="view" aria-label="Ver foto"><img src="${urlFor(it.id, p.n)}" alt=""></button>
+      <button class="px" type="button" data-act="del" aria-label="Remover foto">${ICON.x}</button></div>`).join('');
+  return `<li class="item${done ? ' done' : ''}" data-id="${it.id}">
+    <span class="state" aria-hidden="true">${done ? ICON.check : ''}</span>
+    <div class="ibody">
+      <div class="lbl">${esc(it.label)}${list.length > 1 ? ` <span class="cnt">${list.length} fotos</span>` : ''}</div>
+      ${thumbs ? `<div class="thumbs">${thumbs}</div>` : ''}
       <div class="actions">
-        <button class="btn${has ? '' : ' primary'}" type="button" data-act="cam">${ICON.camera}<span>${has ? 'Refazer' : 'Tirar foto'}</span></button>
+        <button class="btn${done ? '' : ' primary'}" type="button" data-act="cam">${ICON.camera}<span>${done ? 'Outra foto' : 'Tirar foto'}</span></button>
         <button class="btn" type="button" data-act="gal">${ICON.image}<span>Galeria</span></button>
-        ${has ? `<button class="btn icon" type="button" data-act="del" aria-label="Remover foto">${ICON.trash}</button>` : ''}
       </div>
     </div>
   </li>`;
@@ -294,16 +327,19 @@ function renderSection(sec) {
     ${groups}</details>`;
 }
 
+const stepper = (dec, inc, value, attrs = '') =>
+  `<div class="stepper"><button type="button" data-act="${dec}" ${attrs} aria-label="Diminuir">−</button><output>${value}</output><button type="button" data-act="${inc}" ${attrs} aria-label="Aumentar">+</button></div>`;
+
 function renderData(st) {
   const dd = st.dataDone, dt = st.df.length;
+  const nums = stringNums(state);
   const mp = state.mppts.map((m, i) => `
     <div class="mppt">
-      <strong>MPPT ${i + 1}</strong>
+      <strong>MPPT ${i + 1} · ${strLabel(nums[i])}</strong>
       <div class="cols">
         <div class="field"><label for="mod${i}">Quantidade de módulos</label>
           <input id="mod${i}" type="text" inputmode="numeric" autocomplete="off" data-mppt="${i}" data-mf="modules" value="${esc(m.modules)}"></div>
-        <div class="field"><label>Strings neste MPPT</label>
-          <div class="stepper"><button type="button" data-act="str-dec" data-i="${i}" aria-label="Menos uma string">−</button><output>${m.strings}</output><button type="button" data-act="str-inc" data-i="${i}" aria-label="Mais uma string">+</button></div></div>
+        ${state.sameStrings ? '' : `<div class="field"><label>Strings neste MPPT</label>${stepper('str-dec', 'str-inc', m.strings, `data-i="${i}"`)}</div>`}
       </div>
     </div>`).join('');
   return `<details class="sec" data-sec="data"${state.open.data ? ' open' : ''}>
@@ -323,8 +359,13 @@ function renderData(st) {
           <button type="button" data-act="phases" data-v="tri" aria-pressed="${state.phases === 'tri'}">Trifásico</button>
           <button type="button" data-act="phases" data-v="mono" aria-pressed="${state.phases === 'mono'}">Monofásico</button>
         </div></div>
-      <div class="rowline"><span>Quantidade de MPPTs</span>
-        <div class="stepper"><button type="button" data-act="mppt-dec" aria-label="Menos um MPPT">−</button><output>${state.mppts.length}</output><button type="button" data-act="mppt-inc" aria-label="Mais um MPPT">+</button></div></div>
+      <div class="rowline"><span>Quantidade de MPPTs</span>${stepper('mppt-dec', 'mppt-inc', state.mppts.length)}</div>
+      <div class="field"><div class="q">Todos os MPPTs têm a mesma quantidade de strings?</div>
+        <div class="seg" role="group" aria-label="Mesma quantidade de strings">
+          <button type="button" data-act="same" data-v="sim" aria-pressed="${state.sameStrings}">Sim</button>
+          <button type="button" data-act="same" data-v="nao" aria-pressed="${!state.sameStrings}">Não</button>
+        </div></div>
+      ${state.sameStrings ? `<div class="rowline"><span>Strings por MPPT</span>${stepper('all-dec', 'all-inc', state.mppts[0].strings)}</div>` : ''}
       ${mp}
       <div class="field"><label for="f-obs">Observações</label><textarea id="f-obs" data-field="obs">${esc(state.obs)}</textarea></div>
     </div></details>`;
@@ -347,7 +388,7 @@ function render() {
   const y = window.scrollY;
   const st = stats();
   $('#main').innerHTML = renderData(st) + st.secs.map(renderSection).join('') + renderAdd() +
-    '<button class="linkbtn" type="button" data-act="reset">Iniciar nova vistoria</button>';
+    `<button class="linkbtn" type="button" data-act="reset">Iniciar nova vistoria</button><p class="ver">Versão ${APP_VERSION}</p>`;
   updateProgress(st);
   window.scrollTo(0, y);
 }
@@ -369,22 +410,23 @@ async function change(mutator) {
   const before = JSON.parse(JSON.stringify(state));
   mutator(state);
   const valid = new Set(stats().items.map(i => i.id));
-  const orphans = [...blobs.keys()].filter(k => !valid.has(k));
+  const orphans = [...photos.keys()].filter(k => !valid.has(k));
   if (orphans.length) {
+    const n = orphans.reduce((a, k) => a + plist(k).length, 0);
     const ok = await confirmBox('Remover itens do checklist?',
-      `Essa mudança tira ${orphans.length} ${orphans.length > 1 ? 'itens que já têm foto' : 'item que já tem foto'}. As fotos desses itens serão apagadas.`, 'Remover', true);
+      `Essa mudança tira itens que já têm foto. ${n} ${n > 1 ? 'fotos serão apagadas' : 'foto será apagada'}.`, 'Remover', true);
     if (!ok) { state = before; render(); return; }
-    for (const k of orphans) await removePhoto(k);
+    for (const k of orphans) await removeAll(k);
   }
   save(); render();
 }
 
 /* ---------- exportação ---------- */
 function buildReport(st) {
-  const s = state;
+  const s = state, nums = stringNums(s);
   const missing = [
     ...st.df.filter(f => !filled(f.v)).map(f => f.label),
-    ...st.items.filter(i => !blobs.has(i.id)).map(i => `${i.sec}${i.group ? ' / ' + i.group : ''} / ${i.label}`)
+    ...st.items.filter(i => !has(i.id)).map(i => `${i.sec}${i.group ? ' / ' + i.group : ''} / ${i.label}`)
   ];
   const yn = v => v === 'sim' ? 'Sim' : v === 'nao' ? 'Não' : 'Não informado';
   const L = [];
@@ -395,7 +437,7 @@ function buildReport(st) {
   L.push('', 'MÓDULOS FV');
   L.push(`Marca: ${s.modBrand || '—'}`, `Modelo: ${s.modModel || '—'}`, `Potência: ${s.modPower ? s.modPower + ' Wp' : '—'}`);
   L.push('', 'MPPTs');
-  s.mppts.forEach((m, i) => L.push(`MPPT ${i + 1}: ${m.modules || '—'} módulos, ${m.strings} ${m.strings > 1 ? 'strings' : 'string'}`));
+  s.mppts.forEach((m, i) => L.push(`MPPT ${i + 1}: ${m.modules || '—'} módulos, ${strLabel(nums[i])}`));
   L.push('', `Ligação CA: ${s.phases === 'tri' ? 'Trifásica' : 'Monofásica'}`);
   L.push('', 'ADICIONAL');
   L.push(`Fotos revisadas pelo Suporte O&M: ${s.reviewed ? 'Sim' : 'Não'}`);
@@ -418,20 +460,23 @@ async function exportZip() {
   const btn = $('#zipbtn'); btn.disabled = true;
   const label = btn.firstChild.textContent;
   try {
-    const s = state;
+    const s = state, nums = stringNums(s);
     const rootName = `vistoria_${slug(s.ufv) || 'sem_nome'}_${s.date || todayISO()}`;
     const zip = new JSZip();
     const root = zip.folder(rootName);
     const itens = [];
+    let total = 0;
     st.secs.forEach(sec => {
       const dir = root.folder(sec.folder);
       let n = 0;
       sec.groups.forEach(g => g.items.forEach(it => {
         n++;
-        const file = `${pad2(n)}_${slug(it.file)}.jpg`;
-        const b = blobs.get(it.id);
-        if (b) dir.file(file, b);
-        itens.push({ secao: sec.title, grupo: g.title || null, item: it.label, arquivo: b ? `${sec.folder}/${file}` : null });
+        const list = plist(it.id), arquivos = [];
+        list.forEach((p, k) => {
+          const file = `${pad2(n)}_${slug(it.file)}${list.length > 1 ? '_' + (k + 1) : ''}.jpg`;
+          dir.file(file, p.blob); arquivos.push(`${sec.folder}/${file}`); total++;
+        });
+        itens.push({ secao: sec.title, grupo: g.title || null, item: it.label, arquivos });
       }));
     });
     root.file('dados.txt', txt);
@@ -439,7 +484,7 @@ async function exportZip() {
       ufv: s.ufv, data: s.date, gerado_em: new Date().toISOString(),
       modulos: { marca: s.modBrand, modelo: s.modModel, potencia_wp: s.modPower },
       ligacao_ca: s.phases === 'tri' ? 'trifasica' : 'monofasica',
-      mppts: s.mppts.map((m, i) => ({ mppt: i + 1, modulos: m.modules, strings: m.strings })),
+      mppts: s.mppts.map((m, i) => ({ mppt: i + 1, modulos: m.modules, strings: nums[i] })),
       adicional: { fotos_revisadas_suporte_om: !!s.reviewed, testes_com_fabricante: s.factory },
       observacoes: s.obs, itens, faltando: missing
     }, null, 2));
@@ -449,7 +494,7 @@ async function exportZip() {
     const canShare = !!(navigator.canShare && navigator.canShare({ files: [file] }));
     const actions = [{ label: 'Fechar', value: 0 }, { label: 'Baixar', kind: canShare ? '' : 'primary', run: () => download(blob, name) }];
     if (canShare) actions.push({ label: 'Compartilhar', kind: 'primary', run: () => { navigator.share({ files: [file], title: name }).catch(() => {}); } });
-    await sheet({ title: 'ZIP pronto', lines: [name, `${st.photosDone} fotos · ${(blob.size / 1048576).toFixed(1)} MB`], actions });
+    await sheet({ title: 'ZIP pronto', lines: [name, `${total} fotos · ${(blob.size / 1048576).toFixed(1)} MB`], actions });
   } catch (err) { console.error(err); toast('Erro ao gerar o ZIP'); }
   finally { btn.disabled = false; btn.firstChild.textContent = label; }
 }
@@ -464,24 +509,31 @@ function download(blob, name) {
 /* ---------- eventos ---------- */
 document.addEventListener('click', async e => {
   const b = e.target.closest('[data-act]'); if (!b) return;
-  const act = b.dataset.act, id = b.closest('.item')?.dataset.id;
+  const act = b.dataset.act, id = b.closest('.item')?.dataset.id, ph = b.closest('.ph');
   switch (act) {
     case 'cam': pending = id; pendingSrc = 'cam'; startGeo(); $('#camIn').click(); break;
     case 'gal': pending = id; pendingSrc = 'gal'; $('#galIn').click(); break;
-    case 'view': $('#view img').src = urlFor(id); $('#view').hidden = false; break;
+    case 'view': $('#view img').src = urlFor(id, +ph.dataset.n); $('#view').hidden = false; break;
     case 'close-view': $('#view').hidden = true; break;
     case 'del':
-      if (await confirmBox('Remover foto?', itemLabel(id), 'Remover', true)) { await removePhoto(id); render(); }
+      if (await confirmBox('Remover foto?', itemLabel(id), 'Remover', true)) { await removePhoto(id, +ph.dataset.n); render(); }
       break;
     case 'phases': if (state.phases !== b.dataset.v) change(s => { s.phases = b.dataset.v; }); break;
     case 'factory': state.factory = state.factory === b.dataset.v ? null : b.dataset.v; save(); render(); break;
-    case 'mppt-inc': change(s => { if (s.mppts.length < 12) s.mppts.push({ modules: '', strings: s.mppts[s.mppts.length - 1].strings }); }); break;
+    case 'same': {
+      const same = b.dataset.v === 'sim';
+      if (same !== state.sameStrings) change(s => { s.sameStrings = same; if (same) { const k = s.mppts[0].strings; s.mppts.forEach(m => { m.strings = k; }); } });
+      break;
+    }
+    case 'mppt-inc': change(s => { if (s.mppts.length < 24) s.mppts.push({ modules: '', strings: s.sameStrings ? s.mppts[0].strings : s.mppts[s.mppts.length - 1].strings }); }); break;
     case 'mppt-dec': change(s => { if (s.mppts.length > 1) s.mppts.pop(); }); break;
-    case 'str-inc': change(s => { const m = s.mppts[+b.dataset.i]; if (m.strings < 8) m.strings++; }); break;
+    case 'all-inc': change(s => { const k = Math.min(12, s.mppts[0].strings + 1); s.mppts.forEach(m => { m.strings = k; }); }); break;
+    case 'all-dec': change(s => { const k = Math.max(1, s.mppts[0].strings - 1); s.mppts.forEach(m => { m.strings = k; }); }); break;
+    case 'str-inc': change(s => { const m = s.mppts[+b.dataset.i]; if (m.strings < 12) m.strings++; }); break;
     case 'str-dec': change(s => { const m = s.mppts[+b.dataset.i]; if (m.strings > 1) m.strings--; }); break;
     case 'reset':
       if (await confirmBox('Iniciar nova vistoria?', 'Isso apaga todas as fotos e dados da vistoria atual deste aparelho. Gere o ZIP antes, se ainda precisar dele.', 'Apagar e começar', true)) {
-        for (const k of [...blobs.keys()]) await removePhoto(k);
+        for (const k of [...photos.keys()]) await removeAll(k);
         state = defaultState(); save(); render(); window.scrollTo(0, 0);
       }
       break;
@@ -513,7 +565,7 @@ $('#install').addEventListener('click', async () => {
   deferred.prompt(); await deferred.userChoice; deferred = null; $('#install').hidden = true;
 });
 
-/* ---------- início & Service Worker ---------- */
+/* ---------- início ---------- */
 (async function init() {
   const saved = await safe(() => idb('kv', 'readonly', st => st.get('state')));
   if (saved) {
@@ -522,31 +574,26 @@ $('#install').addEventListener('click', async () => {
       state = Object.assign(defaultState(), s);
       state.open = Object.assign(defaultState().open, s.open || {});
       if (!Array.isArray(state.mppts) || !state.mppts.length) state.mppts = defaultState().mppts;
+      if (typeof state.sameStrings !== 'boolean') state.sameStrings = state.mppts.every(m => m.strings === state.mppts[0].strings);
+      delete state.vals;
     } catch (e) { /* mantém o estado padrão */ }
   }
   const keys = await safe(() => idb('photos', 'readonly', st => st.getAllKeys())) || [];
   const vals = await safe(() => idb('photos', 'readonly', st => st.getAll())) || [];
-  keys.forEach((k, i) => { if (vals[i]) blobs.set(k, vals[i]); });
+  keys.forEach((k, i) => {
+    if (!vals[i]) return;
+    const str = String(k), j = str.lastIndexOf('|');
+    const id = j < 0 ? str : str.slice(0, j), n = j < 0 ? 0 : +str.slice(j + 1);
+    const list = photos.get(id) || []; list.push({ n, blob: vals[i] }); photos.set(id, list);
+  });
+  photos.forEach(list => list.sort((a, b) => a.n - b.n));
   render();
   startGeo();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-  
-  // Registro do Service Worker e escuta de atualização
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
-    
-    let refreshing = false;
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (refreshing) return;
-      const btnUpdate = $('#btn-update');
-      if (btnUpdate) {
-        btnUpdate.style.display = 'inline-flex';
-        btnUpdate.addEventListener('click', () => {
-          refreshing = true;
-          window.location.reload();
-        });
-      }
-    });
+    const had = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (had) toast('Atualização instalada. Feche e abra o app.'); });
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r.update()).catch(() => {});
   }
 })();
 
