@@ -513,7 +513,7 @@ $('#install').addEventListener('click', async () => {
   deferred.prompt(); await deferred.userChoice; deferred = null; $('#install').hidden = true;
 });
 
-/* ---------- início ---------- */
+/* ---------- início & Service Worker ---------- */
 (async function init() {
   const saved = await safe(() => idb('kv', 'readonly', st => st.get('state')));
   if (saved) {
@@ -530,7 +530,24 @@ $('#install').addEventListener('click', async () => {
   render();
   startGeo();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  
+  // Registro do Service Worker e escuta de atualização
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+    
+    let refreshing = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (refreshing) return;
+      const btnUpdate = $('#btn-update');
+      if (btnUpdate) {
+        btnUpdate.style.display = 'inline-flex';
+        btnUpdate.addEventListener('click', () => {
+          refreshing = true;
+          window.location.reload();
+        });
+      }
+    });
+  }
 })();
 
 })();
