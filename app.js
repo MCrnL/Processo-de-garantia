@@ -1,6 +1,6 @@
 (() => {
 'use strict';
-const APP_VERSION = 3;
+const APP_VERSION = 4;
 
 /* ---------- utilidades ---------- */
 const $ = s => document.querySelector(s);
@@ -42,6 +42,7 @@ const safe = async fn => { try { return await fn(); } catch (e) { return undefin
 const defaultState = () => ({
   ufv: '', date: todayISO(), obs: '',
   modBrand: '', modModel: '', modPower: '',
+  invBrand: '', invModel: '', invSN: '',
   phases: 'tri',
   sameStrings: true,
   mppts: [{ modules: '', strings: 2 }, { modules: '', strings: 2 }],
@@ -149,11 +150,14 @@ const wmText = (secId, it) =>
   secId === 'inst' ? it.label : secId === 'ca' ? `Tensão CA: ${it.label}` : `Tensão CC: MPPT ${it.mppt}, ${it.label}`;
 
 const dataFields = s => [
-  { label: 'Nome da UFV', v: s.ufv },
-  { label: 'Marca dos módulos', v: s.modBrand },
-  { label: 'Modelo dos módulos', v: s.modModel },
-  { label: 'Potência dos módulos', v: s.modPower },
-  ...s.mppts.map((mp, i) => ({ label: `Quantidade de módulos no MPPT ${i + 1}`, v: mp.modules }))
+  { label: 'Nome da UFV', v: s.ufv, grp: 'sys' },
+  { label: 'Marca dos módulos', v: s.modBrand, grp: 'sys' },
+  { label: 'Modelo dos módulos', v: s.modModel, grp: 'sys' },
+  { label: 'Potência dos módulos', v: s.modPower, grp: 'sys' },
+  ...s.mppts.map((mp, i) => ({ label: `Quantidade de módulos no MPPT ${i + 1}`, v: mp.modules, grp: 'sys' })),
+  { label: 'Marca do inversor', v: s.invBrand, grp: 'inv' },
+  { label: 'Modelo do inversor', v: s.invModel, grp: 'inv' },
+  { label: 'Número de série (SN) do inversor', v: s.invSN, grp: 'inv' }
 ];
 
 function stats() {
@@ -162,11 +166,14 @@ function stats() {
   const df = dataFields(state);
   const photosDone = items.filter(i => has(i.id)).length;
   const dataDone = df.filter(f => filled(f.v)).length;
-  return { secs, items, df, photosDone, dataDone, done: photosDone + dataDone, total: items.length + df.length };
+  const sys = df.filter(f => f.grp === 'sys');
+  return { secs, items, df, photosDone, dataDone, sysDone: sys.filter(f => filled(f.v)).length, sysTotal: sys.length,
+    done: photosDone + dataDone, total: items.length + df.length };
 }
 const secCount = sec => {
   const its = sec.groups.flatMap(g => g.items);
-  return [its.filter(i => has(i.id)).length, its.length];
+  const inv = sec.id === 'inst' ? dataFields(state).filter(f => f.grp === 'inv') : [];
+  return [its.filter(i => has(i.id)).length + inv.filter(f => filled(f.v)).length, its.length + inv.length];
 };
 
 /* ---------- localização ---------- */
@@ -318,10 +325,21 @@ function renderItem(it) {
   </li>`;
 }
 
+function renderInvFields() {
+  return `<li class="invfields">
+    <div class="t">Dados do inversor</div>
+    <div class="grid2">
+      <div class="field"><label for="f-ibrand">Marca</label><input id="f-ibrand" type="text" autocomplete="off" data-field="invBrand" value="${esc(state.invBrand)}"></div>
+      <div class="field"><label for="f-imodel">Modelo</label><input id="f-imodel" type="text" autocomplete="off" data-field="invModel" value="${esc(state.invModel)}"></div>
+    </div>
+    <div class="field"><label for="f-isn">Número de série (SN)</label><input id="f-isn" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" data-field="invSN" value="${esc(state.invSN)}"></div>
+  </li>`;
+}
+
 function renderSection(sec) {
   const [d, t] = secCount(sec);
   const groups = sec.groups.map(g =>
-    `${g.title ? `<div class="gtitle">${esc(g.title)}</div>` : ''}<ul class="items">${g.items.map(renderItem).join('')}</ul>`).join('');
+    `${g.title ? `<div class="gtitle">${esc(g.title)}</div>` : ''}<ul class="items">${g.items.map(it => (it.id === 'inv_etiqueta' ? renderInvFields() : '') + renderItem(it)).join('')}</ul>`).join('');
   return `<details class="sec" data-sec="${sec.id}"${state.open[sec.id] ? ' open' : ''}>
     <summary><span class="sname">${esc(sec.title)}</span><span class="pill${d === t ? ' ok' : ''}" data-pill="${sec.id}">${d}/${t}</span></summary>
     ${groups}</details>`;
@@ -331,7 +349,7 @@ const stepper = (dec, inc, value, attrs = '') =>
   `<div class="stepper"><button type="button" data-act="${dec}" ${attrs} aria-label="Diminuir">−</button><output>${value}</output><button type="button" data-act="${inc}" ${attrs} aria-label="Aumentar">+</button></div>`;
 
 function renderData(st) {
-  const dd = st.dataDone, dt = st.df.length;
+  const dd = st.sysDone, dt = st.sysTotal;
   const nums = stringNums(state);
   const mp = state.mppts.map((m, i) => `
     <div class="mppt">
@@ -401,7 +419,7 @@ function updateProgress(st = stats()) {
   const missing = st.total - st.done;
   $('#zipsub').textContent = missing ? `faltam ${missing}` : 'tudo pronto';
   const set = (id, d, t) => { const p = document.querySelector(`[data-pill="${id}"]`); if (p) { p.textContent = `${d}/${t}`; p.classList.toggle('ok', d === t); } };
-  set('data', st.dataDone, st.df.length);
+  set('data', st.sysDone, st.sysTotal);
   st.secs.forEach(sec => { const [d, t] = secCount(sec); set(sec.id, d, t); });
 }
 
@@ -436,6 +454,8 @@ function buildReport(st) {
   L.push(`Gerado em: ${new Date().toLocaleString('pt-BR')}`);
   L.push('', 'MÓDULOS FV');
   L.push(`Marca: ${s.modBrand || '—'}`, `Modelo: ${s.modModel || '—'}`, `Potência: ${s.modPower ? s.modPower + ' Wp' : '—'}`);
+  L.push('', 'INVERSOR');
+  L.push(`Marca: ${s.invBrand || '—'}`, `Modelo: ${s.invModel || '—'}`, `Número de série (SN): ${s.invSN || '—'}`);
   L.push('', 'MPPTs');
   s.mppts.forEach((m, i) => L.push(`MPPT ${i + 1}: ${m.modules || '—'} módulos, ${strLabel(nums[i])}`));
   L.push('', `Ligação CA: ${s.phases === 'tri' ? 'Trifásica' : 'Monofásica'}`);
@@ -461,7 +481,7 @@ async function exportZip() {
   const label = btn.firstChild.textContent;
   try {
     const s = state, nums = stringNums(s);
-    const rootName = `vistoria_${slug(s.ufv) || 'sem_nome'}_${s.date || todayISO()}`;
+    const rootName = `vistoria_${slug(s.ufv) || 'sem_nome'}${filled(s.invSN) ? '_SN' + slug(s.invSN) : ''}_${s.date || todayISO()}`;
     const zip = new JSZip();
     const root = zip.folder(rootName);
     const itens = [];
@@ -482,6 +502,7 @@ async function exportZip() {
     root.file('dados.txt', txt);
     root.file('dados.json', JSON.stringify({
       ufv: s.ufv, data: s.date, gerado_em: new Date().toISOString(),
+      inversor: { marca: s.invBrand, modelo: s.invModel, numero_serie: s.invSN },
       modulos: { marca: s.modBrand, modelo: s.modModel, potencia_wp: s.modPower },
       ligacao_ca: s.phases === 'tri' ? 'trifasica' : 'monofasica',
       mppts: s.mppts.map((m, i) => ({ mppt: i + 1, modulos: m.modules, strings: nums[i] })),

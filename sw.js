@@ -1,4 +1,4 @@
-const VERSION = 'vistoria-v3';
+const VERSION = 'vistoria-v4';
 const SHELL = ['./', 'index.html', 'app.js', 'jszip.min.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
