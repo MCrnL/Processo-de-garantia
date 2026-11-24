@@ -1,6 +1,6 @@
 (() => {
 'use strict';
-const APP_VERSION = 4;
+const APP_VERSION = 6;
 
 /* ---------- utilidades ---------- */
 const $ = s => document.querySelector(s);
@@ -43,6 +43,7 @@ const defaultState = () => ({
   ufv: '', date: todayISO(), obs: '',
   modBrand: '', modModel: '', modPower: '',
   invBrand: '', invModel: '', invSN: '',
+  na: {},                    // itens marcados como "não aplicável"
   phases: 'tri',
   sameStrings: true,
   mppts: [{ modules: '', strings: 2 }, { modules: '', strings: 2 }],
@@ -96,58 +97,60 @@ const strLabel = nums => nums.length === 1
   : `Strings ${nums.slice(0, -1).join(', ')} e ${nums[nums.length - 1]}`;
 
 /* ---------- montagem do checklist ---------- */
+const NOTE_FN = 'Se não houver neutro, teste entre fase e terra';
 function buildSections(s) {
   const inst = [
     ['inv_frente', 'Frente do inversor, mostrando os arredores', 'inversor_frente'],
     ['inv_etiqueta', 'Etiqueta com número de série e modelo do inversor', 'inversor_etiqueta'],
-    ['inv_garantia', 'Selo de garantia do inversor', 'inversor_selo_garantia'],
+    ['inv_garantia', 'Selo de garantia do inversor', 'inversor_selo_garantia', true],
     ['cc_conectado', 'Conexões CC do inversor, cabos conectados', 'conexoes_CC_conectadas'],
     ['cc_desconectado', 'Conexões CC do inversor, cabos desconectados', 'conexoes_CC_desconectadas'],
     ['ca_sem_tampa', 'Conexões CA do inversor, sem a tampa de proteção', 'conexoes_CA_sem_tampa'],
     ['protecoes', 'Proteções CC e CA (QGBT e string box abertos)', 'protecoes_CC_CA']
-  ].map(([id, label, file]) => ({ id, label, file }));
+  ].map(([id, label, file, optional]) => ({ id, label, file, optional: !!optional }));
 
   const m = (id, label, file, mppt) => ({ id, label, file, mppt });
+  const opt = it => ({ ...it, optional: true });
   const caGroups = s.phases === 'tri' ? [
     { title: 'Entre fases', items: [
       m('ca_l1l2', 'Fase L1 e fase L2', 'L1_L2'),
       m('ca_l2l3', 'Fase L2 e fase L3', 'L2_L3'),
       m('ca_l1l3', 'Fase L1 e fase L3', 'L1_L3')] },
-    { title: 'Entre fase e neutro', items: [
+    { title: 'Entre fase e neutro', note: NOTE_FN, items: [
       m('ca_l1n', 'Fase L1 e neutro', 'L1_N'),
       m('ca_l2n', 'Fase L2 e neutro', 'L2_N'),
       m('ca_l3n', 'Fase L3 e neutro', 'L3_N')] },
-    { title: 'Entre neutro e terra', items: [m('ca_nt', 'Neutro e terra', 'N_PE')] }
+    { title: 'Entre neutro e terra', items: [opt(m('ca_nt', 'Neutro e terra', 'N_PE'))] }
   ] : [
-    { title: 'Entre fase e neutro', items: [m('ca_fn', 'Fase e neutro', 'F_N')] },
-    { title: 'Entre neutro e terra', items: [m('ca_nt', 'Neutro e terra', 'N_PE')] }
+    { title: 'Entre fase e neutro', note: NOTE_FN, items: [m('ca_fn', 'Fase e neutro', 'F_N')] },
+    { title: 'Entre neutro e terra', items: [opt(m('ca_nt', 'Neutro e terra', 'N_PE'))] }
   ];
 
-  const ccGroups = [], peGroups = [];
+  const ccItems = [], peItems = [];
   const nums = stringNums(s);
   s.mppts.forEach((mp, i) => {
-    const ccItems = [], peItems = [];
     nums[i].forEach((num, j) => {
-      const base = `MPPT${pad2(i + 1)}_String${pad2(num)}`;
+      const base = `String${pad2(num)}`;
       ccItems.push(m(`cc_${i + 1}_${j + 1}`, `String ${num}`, base, i + 1));
-      peItems.push(m(`pp_${i + 1}_${j + 1}`, `Positivo - Terra String ${num}`, `${base}_positivo_terra`, i + 1));
-      peItems.push(m(`pn_${i + 1}_${j + 1}`, `Negativo - Terra String ${num}`, `${base}_negativo_terra`, i + 1));
+      peItems.push(m(`pp_${i + 1}_${j + 1}`, `Teste de Flutuação String ${num} Positivo`, `${base}_flutuacao_positivo`, i + 1));
+      peItems.push(m(`pn_${i + 1}_${j + 1}`, `Teste de Flutuação String ${num} Negativo`, `${base}_flutuacao_negativo`, i + 1));
     });
-    const title = `MPPT ${i + 1} · ${strLabel(nums[i])}`;
-    ccGroups.push({ title, items: ccItems });
-    peGroups.push({ title, items: peItems });
   });
+  const ccGroups = [{ title: '', items: ccItems }], peGroups = [{ title: '', items: peItems }];
 
   return [
     { id: 'inst', title: 'Fotos da instalação', folder: '1_instalacao', groups: [{ title: '', items: inst }] },
     { id: 'ca', title: 'Tensão CA', folder: '2_tensao_CA', groups: caGroups },
     { id: 'cc', title: 'Tensão CC das strings', folder: '3_tensao_CC_strings', groups: ccGroups },
-    { id: 'pe', title: 'Tensão CC entre PV e terra', folder: '4_tensao_CC_PV_terra', groups: peGroups }
+    { id: 'pe', title: 'Teste de flutuação (PV e terra)', folder: '4_teste_flutuacao_PV_terra', groups: peGroups }
   ];
 }
 
 const wmText = (secId, it) =>
-  secId === 'inst' ? it.label : secId === 'ca' ? `Tensão CA: ${it.label}` : `Tensão CC: MPPT ${it.mppt}, ${it.label}`;
+  secId === 'inst' ? it.label
+  : secId === 'ca' ? `Tensão CA: ${it.label}`
+  : secId === 'cc' ? `Tensão CC: ${it.label}`
+  : it.label;
 
 const dataFields = s => [
   { label: 'Nome da UFV', v: s.ufv, grp: 'sys' },
@@ -162,16 +165,17 @@ const dataFields = s => [
 
 function stats() {
   const secs = buildSections(state);
-  const items = secs.flatMap(sec => sec.groups.flatMap(g => g.items.map(it => ({ ...it, sec: sec.title, group: g.title, wm: wmText(sec.id, it) }))));
+  const items = secs.flatMap(sec => sec.groups.flatMap(g => g.items.map(it => ({ ...it, sec: sec.title, group: g.title, wm: wmText(sec.id, it), na: !!(it.optional && state.na[it.id]) }))));
   const df = dataFields(state);
-  const photosDone = items.filter(i => has(i.id)).length;
+  const active = items.filter(i => !i.na);
+  const photosDone = active.filter(i => has(i.id)).length;
   const dataDone = df.filter(f => filled(f.v)).length;
   const sys = df.filter(f => f.grp === 'sys');
   return { secs, items, df, photosDone, dataDone, sysDone: sys.filter(f => filled(f.v)).length, sysTotal: sys.length,
-    done: photosDone + dataDone, total: items.length + df.length };
+    done: photosDone + dataDone, total: active.length + df.length };
 }
 const secCount = sec => {
-  const its = sec.groups.flatMap(g => g.items);
+  const its = sec.groups.flatMap(g => g.items).filter(i => !(i.optional && state.na[i.id]));
   const inv = sec.id === 'inst' ? dataFields(state).filter(f => f.grp === 'inv') : [];
   return [its.filter(i => has(i.id)).length + inv.filter(f => filled(f.v)).length, its.length + inv.length];
 };
@@ -308,19 +312,23 @@ const confirmBox = (title, text, ok = 'Confirmar', danger = false) =>
 const itemLabel = id => (stats().items.find(i => i.id === id) || {}).label || '';
 
 function renderItem(it) {
-  const list = plist(it.id), done = list.length > 0;
+  const na = !!(it.optional && state.na[it.id]);
+  const list = plist(it.id), done = na || list.length > 0;
   const thumbs = list.map(p => `<div class="ph" data-n="${p.n}">
       <button class="pv" type="button" data-act="view" aria-label="Ver foto"><img src="${urlFor(it.id, p.n)}" alt=""></button>
       <button class="px" type="button" data-act="del" aria-label="Remover foto">${ICON.x}</button></div>`).join('');
-  return `<li class="item${done ? ' done' : ''}" data-id="${it.id}">
-    <span class="state" aria-hidden="true">${done ? ICON.check : ''}</span>
-    <div class="ibody">
-      <div class="lbl">${esc(it.label)}${list.length > 1 ? ` <span class="cnt">${list.length} fotos</span>` : ''}</div>
+  const optBox = it.optional ? `<label class="check opt"><input type="checkbox" data-opt="${it.id}"${na ? '' : ' checked'}>Aplicável a este inversor</label>` : '';
+  const body = na ? '<div class="nanote">Não se aplica a este inversor</div>' : `
       ${thumbs ? `<div class="thumbs">${thumbs}</div>` : ''}
       <div class="actions">
         <button class="btn${done ? '' : ' primary'}" type="button" data-act="cam">${ICON.camera}<span>${done ? 'Outra foto' : 'Tirar foto'}</span></button>
         <button class="btn" type="button" data-act="gal">${ICON.image}<span>Galeria</span></button>
-      </div>
+      </div>`;
+  return `<li class="item${done ? ' done' : ''}${na ? ' na' : ''}" data-id="${it.id}">
+    <span class="state" aria-hidden="true">${na ? '–' : done ? ICON.check : ''}</span>
+    <div class="ibody">
+      <div class="lbl">${esc(it.label)}${list.length > 1 && !na ? ` <span class="cnt">${list.length} fotos</span>` : ''}</div>
+      ${optBox}${body}
     </div>
   </li>`;
 }
@@ -339,7 +347,7 @@ function renderInvFields() {
 function renderSection(sec) {
   const [d, t] = secCount(sec);
   const groups = sec.groups.map(g =>
-    `${g.title ? `<div class="gtitle">${esc(g.title)}</div>` : ''}<ul class="items">${g.items.map(it => (it.id === 'inv_etiqueta' ? renderInvFields() : '') + renderItem(it)).join('')}</ul>`).join('');
+    `${g.title ? `<div class="gtitle">${esc(g.title)}</div>` : ''}${g.note ? `<div class="gnote">${esc(g.note)}</div>` : ''}<ul class="items">${g.items.map(it => (it.id === 'inv_etiqueta' ? renderInvFields() : '') + renderItem(it)).join('')}</ul>`).join('');
   return `<details class="sec" data-sec="${sec.id}"${state.open[sec.id] ? ' open' : ''}>
     <summary><span class="sname">${esc(sec.title)}</span><span class="pill${d === t ? ' ok' : ''}" data-pill="${sec.id}">${d}/${t}</span></summary>
     ${groups}</details>`;
@@ -444,7 +452,7 @@ function buildReport(st) {
   const s = state, nums = stringNums(s);
   const missing = [
     ...st.df.filter(f => !filled(f.v)).map(f => f.label),
-    ...st.items.filter(i => !has(i.id)).map(i => `${i.sec}${i.group ? ' / ' + i.group : ''} / ${i.label}`)
+    ...st.items.filter(i => !i.na && !has(i.id)).map(i => `${i.sec}${i.group ? ' / ' + i.group : ''} / ${i.label}`)
   ];
   const yn = v => v === 'sim' ? 'Sim' : v === 'nao' ? 'Não' : 'Não informado';
   const L = [];
@@ -463,6 +471,8 @@ function buildReport(st) {
   L.push(`Fotos revisadas pelo Suporte O&M: ${s.reviewed ? 'Sim' : 'Não'}`);
   L.push(`Testes executados em contato com a fabricante do inversor: ${yn(s.factory)}`);
   if (filled(s.obs)) L.push('', 'OBSERVAÇÕES', s.obs.trim());
+  const nas = st.items.filter(i => i.na);
+  if (nas.length) { L.push('', 'NÃO SE APLICA'); nas.forEach(i => L.push('- ' + i.label)); }
   if (missing.length) { L.push('', `ITENS FALTANDO (${missing.length})`); missing.forEach(m => L.push('- ' + m)); }
   return { txt: L.join('\n') + '\n', missing };
 }
@@ -491,12 +501,13 @@ async function exportZip() {
       let n = 0;
       sec.groups.forEach(g => g.items.forEach(it => {
         n++;
-        const list = plist(it.id), arquivos = [];
+        const naI = !!(it.optional && state.na[it.id]);
+        const list = naI ? [] : plist(it.id), arquivos = [];
         list.forEach((p, k) => {
           const file = `${pad2(n)}_${slug(it.file)}${list.length > 1 ? '_' + (k + 1) : ''}.jpg`;
           dir.file(file, p.blob); arquivos.push(`${sec.folder}/${file}`); total++;
         });
-        itens.push({ secao: sec.title, grupo: g.title || null, item: it.label, arquivos });
+        itens.push({ secao: sec.title, grupo: g.title || null, item: it.label, nao_se_aplica: naI, arquivos });
       }));
     });
     root.file('dados.txt', txt);
@@ -569,7 +580,19 @@ document.addEventListener('input', e => {
   else return;
   save(); updateProgress();
 });
-document.addEventListener('change', e => { if (e.target.dataset.flag === 'reviewed') { state.reviewed = e.target.checked; save(); } });
+document.addEventListener('change', async e => {
+  const t = e.target;
+  if (t.dataset.flag === 'reviewed') { state.reviewed = t.checked; save(); }
+  else if (t.dataset.opt) {
+    const id = t.dataset.opt;
+    if (t.checked) delete state.na[id];
+    else {
+      if (has(id) && !(await confirmBox('Marcar como não aplicável?', `As fotos de "${itemLabel(id)}" serão apagadas.`, 'Apagar fotos', true))) { render(); return; }
+      await removeAll(id); state.na[id] = true;
+    }
+    save(); render();
+  }
+});
 document.addEventListener('toggle', e => {
   const sec = e.target.dataset && e.target.dataset.sec;
   if (sec) { state.open[sec] = e.target.open; save(); }
